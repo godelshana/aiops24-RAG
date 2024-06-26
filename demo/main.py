@@ -4,6 +4,9 @@ from dotenv import dotenv_values
 from llama_index.core import Settings
 from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 from llama_index.llms.ollama import Ollama
+from llama_index.postprocessor.flag_embedding_reranker import (
+    FlagEmbeddingReranker,
+)
 from qdrant_client import models
 from tqdm.asyncio import tqdm
 
@@ -20,11 +23,13 @@ async def main():
         model="qwen", base_url=config["OLLAMA_URL"], temperature=0, request_timeout=120
     )
     embeding = HuggingFaceEmbedding(
-        model_name="BAAI/bge-small-zh-v1.5",
+        model_name="BAAI/bge-m3",
         cache_folder="./",
         embed_batch_size=128,
     )
     Settings.embed_model = embeding
+
+    reranker = FlagEmbeddingReranker(model="BAAI/bge-reranker-v2-m3", top_n=5, use_fp16=True)
 
     # 初始化 数据ingestion pipeline 和 vector store
     client, vector_store = await build_vector_store(config, reindex=False)
@@ -49,7 +54,7 @@ async def main():
         )
         print(len(data))
 
-    retriever = QdrantRetriever(vector_store, embeding, similarity_top_k=3)
+    retriever = QdrantRetriever(vector_store, embeding, similarity_top_k=10)
 
     queries = read_jsonl("question.jsonl")
 
@@ -59,7 +64,7 @@ async def main():
     results = []
     for query in tqdm(queries, total=len(queries)):
         result = await generation_with_knowledge_retrieval(
-            query["query"], retriever, llm
+            query["query"], retriever, llm, reranker=reranker
         )
         results.append(result)
 
