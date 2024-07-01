@@ -1,6 +1,5 @@
 from typing import List
 import qdrant_client
-
 from llama_index.core.llms.llm import LLM
 from llama_index.vector_stores.qdrant import QdrantVectorStore
 from llama_index.core.postprocessor.types import BaseNodePostprocessor
@@ -10,8 +9,15 @@ from llama_index.core import (
     PromptTemplate,
     StorageContext,
     VectorStoreIndex,
+    ServiceContext
+)
+from llama_index.core.evaluation import (
+    RelevancyEvaluator, 
+    FaithfulnessEvaluator, 
+    CorrectnessEvaluator
 )
 from llama_index.core.embeddings import BaseEmbedding
+from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 from llama_index.core.retrievers import BaseRetriever
 from llama_index.core.schema import NodeWithScore
 from llama_index.core.base.llms.types import CompletionResponse
@@ -60,6 +66,7 @@ async def generation_with_knowledge_retrieval(
     query_str: str,
     retriever: BaseRetriever,
     llm: LLM,
+    embed_model: HuggingFaceEmbedding,
     qa_template: str = QA_TEMPLATE,
     reranker: BaseNodePostprocessor | None = None,
     debug: bool = False,
@@ -73,14 +80,49 @@ async def generation_with_knowledge_retrieval(
         node_with_scores = reranker.postprocess_nodes(node_with_scores, query_bundle)
         if debug:
             print(f"reranked:\n{node_with_scores}\n------")
-    context_str = "\n\n".join(
-        [f"{node.metadata['document_title']}: {node.text}" for node in node_with_scores]
-    )
+    
+    contexts = [f"{node.metadata['document_title']}: {node.text}" for node in node_with_scores]
+    context_str = "\n\n".join(contexts)
     fmt_qa_prompt = PromptTemplate(qa_template).format(
         context_str=context_str, query_str=query_str
     )
     ret = await llm.acomplete(fmt_qa_prompt)
     if progress:
         progress.update(1)
-    return ret
+    
+    # Create a ServiceContext with the provided LLM
+    service_context = ServiceContext.from_defaults(llm=llm, embed_model=embed_model)
+
+    # Initialize evaluators
+    relevancy_evaluator = RelevancyEvaluator(service_context=service_context)
+    faithfulness_evaluator = FaithfulnessEvaluator(service_context=service_context)
+    correctness_evaluator = CorrectnessEvaluator(service_context=service_context)
+
+    # Perform evaluations
+    relevancy_score = await relevancy_evaluator.aevaluate(
+        query=query_str,
+        response=ret.text,
+        contexts=[node.node.text for node in node_with_scores]
+    )
+    
+    faithfulness_score = await faithfulness_evaluator.aevaluate(
+        query=query_str,
+        response=ret.text,
+        contexts=[node.node.text for node in node_with_scores]
+    )
+    
+    correctness_score = await correctness_evaluator.aevaluate(
+        query=query_str,
+        response=ret.text,
+        contexts=[node.node.text for node in node_with_scores]
+    )
+
+    eval_results = {
+        "relevancy": relevancy_score,
+        "faithfulness": faithfulness_score,
+        "correctness": correctness_score
+    }
+
+    return ret, eval_results
+
 
